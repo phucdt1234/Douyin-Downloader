@@ -1,11 +1,11 @@
 # Douyin Downloader
 
-Ứng dụng Android tải video, ảnh, album nhiều ảnh, live photo và audio từ Douyin. Chế độ Douyin dùng parser native dựa trên [`jiji262/douyin-downloader`](https://github.com/jiji262/douyin-downloader), không dùng yt-dlp làm fallback.
+Ứng dụng Android tải video, ảnh, album nhiều ảnh, live photo và audio từ Douyin. Downloader này dựa trên [`jiji262/douyin-downloader`](https://github.com/jiji262/douyin-downloader).
 
-- Package: `com.yvii.douyindownloader`
-- Mặc định lưu vào `Internal storage/DCIM/DouyinDownloader`
-- Có thể chọn thư mục khác bằng Android Storage Access Framework
-- Chế độ Video dùng yt-dlp; chế độ Extra dùng cobalt API
+
+Chức năng chính:
+- Tải video/image/live photo từ Douyin
+- Tải video từ các nguồn khác bằng [yt-dlp](https://github.com/yt-dlp/yt-dlp) và [cobalt](https://github.com/imputnet/cobalt)
 
 ## Build
 
