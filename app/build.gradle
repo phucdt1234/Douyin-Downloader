@@ -1,0 +1,66 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+
+android {
+    namespace 'com.yvii.douyindownloader'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.yvii.douyindownloader'
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    lint {
+        abortOnError false
+    }
+
+    buildFeatures {
+        compose true
+        buildConfig false
+    }
+
+    sourceSets {
+        main {
+            java.setSrcDirs([])
+            kotlin.setSrcDirs(['src/main/kotlin-clean'])
+            res.setSrcDirs(['src/main/res-clean'])
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity-compose:1.13.0'
+    implementation 'androidx.compose.foundation:foundation:1.10.6'
+    implementation 'androidx.compose.material3:material3:1.4.0'
+    implementation 'androidx.compose.runtime:runtime:1.10.6'
+    implementation 'androidx.compose.ui:ui:1.10.6'
+    implementation 'androidx.compose.ui:ui-tooling-preview:1.10.6'
+    implementation 'androidx.core:core-ktx:1.18.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+    implementation 'io.coil-kt:coil-compose:2.7.0'
+    implementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
+    implementation 'io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1'
+
+    debugImplementation 'androidx.compose.ui:ui-tooling:1.10.6'
+}
