@@ -175,7 +175,7 @@ suspend fun analyzeByMode(
     settings: DownloadSettings,
     onProgress: (String) -> Unit
 ): AnalyzedMedia = when (mode) {
-    DownloadMode.Douyin -> analyzeDouyin(url, settings, onProgress)
+    DownloadMode.Douyin -> analyzeDouyin(context, url, settings, onProgress)
     DownloadMode.Video -> analyzeVideo(context, url, settings, onProgress)
     DownloadMode.Extra -> analyzeCobalt(url, settings, onProgress)
 }
@@ -210,10 +210,11 @@ private suspend fun analyzeVideo(
 }
 
 private suspend fun analyzeDouyin(
+    context: Context,
     url: String,
     settings: DownloadSettings,
     onProgress: (String) -> Unit
-): AnalyzedMedia = analyzeDouyinWithJiji(url, settings, onProgress)
+): AnalyzedMedia = analyzeDouyinWithJiji(context, url, settings, onProgress)
 
 private suspend fun analyzeCobalt(
     url: String,

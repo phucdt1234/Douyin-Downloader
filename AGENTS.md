@@ -49,6 +49,9 @@ Không sửa mã decompile rồi kỳ vọng ứng dụng thay đổi. Nếu c�
 - Mode Douyin phải dùng parser native trong `JijiDouyinBackend.kt`.
 - Không chuyển link Douyin sang yt-dlp hoặc cobalt để làm fallback.
 - Logic backend phải bám theo hành vi hiện hành của `jiji262/douyin-downloader`; đây là bản port Kotlin, không phải dependency runtime.
+- Parser must accept both upstream snake_case payloads and Douyin web camelCase payloads, including `playAddr: [{"src": "..."}]`.
+- Share pages may omit `images[].video`. For gallery posts without nested motion data, use the bounded off-screen WebView enrichment in `JijiDouyinBackend.kt` before classifying items.
+- Keep WebView enrichment restricted to `https://www.douyin.com/note/{awemeId}`. Disable file and content access, enforce a timeout, and always destroy the WebView after completion or cancellation.
 - Trước khi ký URL, luôn loại bỏ chữ ký `X-Bogus` và `a_bogus` cũ rồi tạo chữ ký mới.
 - Duy trì danh sách URL mirror theo thứ tự ưu tiên; một mirror lỗi phải thử mirror tiếp theo.
 - File tải về có kích thước `0 B` là lỗi. Không lưu file rỗng vào MediaStore hoặc SAF.

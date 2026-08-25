@@ -5,6 +5,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ApplicationInfo
 import android.net.Uri
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -32,6 +35,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -142,6 +146,7 @@ private fun DownloaderApp(sharedText: String?) {
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    var showDouyinLogin by remember { mutableStateOf(false) }
     var settingsByMode by remember { mutableStateOf(loadSettings(context)) }
     var analyzed by remember { mutableStateOf<AnalyzedMedia?>(null) }
     var status by remember { mutableStateOf("Ready") }
@@ -169,6 +174,17 @@ private fun DownloaderApp(sharedText: String?) {
         if (!sharedText.isNullOrBlank()) input = sharedText
     }
 
+    if (showDouyinLogin) {
+        DouyinLoginDialog(onDismiss = { showDouyinLogin = false }) { cookie ->
+            val updated = settingsByMode + (DownloadMode.Douyin to settings.copy(cookies = cookie))
+            settingsByMode = updated
+            saveSettings(context, updated)
+            status = "Douyin login saved"
+            log = "Douyin session cookie updated"
+            showDouyinLogin = false
+        }
+    }
+
     if (showSettings) {
         SettingsDialog(
             mode = mode,
@@ -181,6 +197,7 @@ private fun DownloaderApp(sharedText: String?) {
                 status = "Default folder restored"
                 log = saveDestination.label
             },
+            onLoginDouyin = if (mode == DownloadMode.Douyin) ({ showDouyinLogin = true }) else null,
             onDismiss = { showSettings = false },
             onSave = { newSettings ->
                 val updated = settingsByMode + (mode to newSettings)
@@ -475,6 +492,55 @@ private fun AnalyzedCard(media: AnalyzedMedia, selectedImages: MutableList<Strin
     }
 }
 
+
+@Composable
+private fun DouyinLoginDialog(onDismiss: () -> Unit, onCookies: (String) -> Unit) {
+    var webView by remember { mutableStateOf<WebView?>(null) }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Login Douyin", style = MaterialTheme.typography.titleLarge)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            val cookie = webView?.let { CookieManager.getInstance().getCookie(it.url.orEmpty()) }.orEmpty()
+                            if (cookie.isNotBlank()) onCookies(cookie)
+                        }) { Text("Done") }
+                        TextButton(onClick = onDismiss) { Text("Close") }
+                    }
+                }
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.userAgentString = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/139.0 Mobile Safari/537.36"
+                            CookieManager.getInstance().setAcceptCookie(true)
+                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView, url: String) {
+                                    val cookie = CookieManager.getInstance().getCookie(url).orEmpty()
+                                    if (cookie.contains("msToken=") || cookie.contains("sessionid")) onCookies(cookie)
+                                }
+                            }
+                            loadUrl("https://www.douyin.com/")
+                        }
+                    },
+                    update = { webView = it },
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun SettingsDialog(
     mode: DownloadMode,
@@ -483,6 +549,7 @@ private fun SettingsDialog(
     customSaveLocation: Boolean,
     onChooseFolder: () -> Unit,
     onUseDefaultFolder: () -> Unit,
+    onLoginDouyin: (() -> Unit)?,
     onDismiss: () -> Unit,
     onSave: (DownloadSettings) -> Unit
 ) {
@@ -524,6 +591,7 @@ private fun SettingsDialog(
                             ImageFormatChoice.entries,
                             ImageFormatChoice::label
                         ) { draft = draft.copy(imageFormat = it) }
+                        onLoginDouyin?.let { login -> OutlinedButton(onClick = login) { Text("Login Douyin") } }
                         OutlinedTextField(
                             value = draft.cookies,
                             onValueChange = { draft = draft.copy(cookies = it) },

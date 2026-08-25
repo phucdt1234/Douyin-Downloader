@@ -1,17 +1,27 @@
 package com.yvii.douyindownloader
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
+import kotlin.coroutines.resume
 import kotlin.math.abs
 
 private const val DOUYIN_BASE_URL = "https://www.douyin.com"
@@ -19,9 +29,14 @@ private const val DOUYIN_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
 private val GALLERY_AWEME_TYPES = setOf(2, 68, 150)
-private val PLAY_ADDRESS_KEYS = listOf("play_addr_h264", "play_addr_265", "play_addr_256", "play_addr")
+private val PLAY_ADDRESS_KEYS = listOf(
+    "play_addr_h264", "play_addr_265", "play_addr_256", "play_addr",
+    "playAddrH264", "playAddrH265", "playAddr256", "playAddr"
+)
+private val DOWNLOAD_ADDRESS_KEYS = listOf("download_addr", "downloadAddr")
 
 internal suspend fun analyzeDouyinWithJiji(
+    context: Context,
     url: String,
     settings: DownloadSettings,
     onProgress: (String) -> Unit
@@ -45,10 +60,17 @@ internal suspend fun analyzeDouyinWithJiji(
             mobileUserAgent = true
         ).body
     }.getOrDefault("")
-    val payload = apiPayload
+    val isNote = resolved.finalUrl.contains("/note/") || resolved.finalUrl.contains("/gallery/")
+    var payload = apiPayload
         ?: extractDouyinPayloadFromHtml(shareBody)
         ?: extractDouyinPayloadFromHtml(resolved.body)
-        ?: error("Douyin returned no downloadable media. Add fresh cookies and try again.")
+    if (payload == null || (isGalleryPayload(payload) && !hasNestedLivePhoto(payload))) {
+        onProgress(if (payload == null) "Fetching Douyin media" else "Checking live photos")
+        fetchWebAwemeDetail(context, awemeId, if (isNote) "note" else "video")?.let { webPayload ->
+            payload = webPayload
+        }
+    }
+    payload ?: error("Douyin returned no downloadable media. Add fresh cookies and try again.")
     parseAwemePayload(payload, resolved.finalUrl, settings.quality)
 }
 
@@ -164,17 +186,9 @@ private fun parseAwemePayload(
     val galleryItems = galleryItems(payload)
     val topVideo = payload.optJSONObject("video")
     val topVideoCandidates = collectVideoCandidates(topVideo, quality)
-    val topLevelLiveCandidates = if (
-        payload.isLivePhoto() ||
-        payload.optInt("aweme_type", -1) == 2 && galleryItems.size == 1 &&
-        topVideo?.optInt("duration", -1) == 0 && topVideoCandidates.isNotEmpty()
-    ) {
-        topVideoCandidates
-    } else {
-        emptyList()
-    }
+    val awemeType = payload.optInt("aweme_type", payload.optInt("awemeType", -1))
     val isGallery = galleryItems.isNotEmpty() ||
-        payload.optInt("aweme_type", -1) in GALLERY_AWEME_TYPES && !hasVideoSource(topVideo)
+        awemeType in GALLERY_AWEME_TYPES && !hasVideoSource(topVideo)
     val images = mutableListOf<MediaItem>()
     val livePhotos = mutableListOf<LivePhotoItem>()
     if (isGallery) {
@@ -183,9 +197,7 @@ private fun parseAwemePayload(
             val image = imageCandidates.firstOrNull()?.let {
                 MediaItem(it, "Image ${index + 1}", imageCandidates.drop(1))
             }
-            val liveCandidates = collectLivePhotoVideoCandidates(item, quality).ifEmpty {
-                if (index == 0) topLevelLiveCandidates else emptyList()
-            }
+            val liveCandidates = collectLivePhotoVideoCandidates(item, quality)
             if (liveCandidates.isNotEmpty()) {
                 livePhotos += LivePhotoItem(
                     image = image,
@@ -216,7 +228,12 @@ private fun JSONObject.isLivePhoto(): Boolean = when (val value = opt("is_live_p
     is Boolean -> value
     is Number -> value.toInt() == 1
     is String -> value == "1" || value.equals("true", ignoreCase = true)
-    else -> false
+    else -> when (val camelValue = opt("isLivePhoto")) {
+        is Boolean -> camelValue
+        is Number -> camelValue.toInt() == 1
+        is String -> camelValue == "1" || camelValue.equals("true", ignoreCase = true)
+        else -> false
+    }
 }
 
 private fun collectVideoCandidates(video: JSONObject?, quality: QualityChoice): List<String> {
@@ -226,13 +243,15 @@ private fun collectVideoCandidates(video: JSONObject?, quality: QualityChoice): 
         preferred?.optString("uri")?.takeIf(String::isHttpUrl)?.let(::add)
         addAll(preferred.urlList())
         PLAY_ADDRESS_KEYS.forEach { key ->
-            val address = video.optJSONObject(key)
-            address?.optString("uri")?.takeIf(String::isHttpUrl)?.let(::add)
-            addAll(address.urlList())
+            val address = video.opt(key)
+            (address as? JSONObject)?.optString("uri")?.takeIf(String::isHttpUrl)?.let(::add)
+            addAll(extractUrls(address))
         }
-        val downloadAddress = video.optJSONObject("download_addr")
-        downloadAddress?.optString("uri")?.takeIf(String::isHttpUrl)?.let(::add)
-        addAll(downloadAddress.urlList())
+        DOWNLOAD_ADDRESS_KEYS.forEach { key ->
+            val address = video.opt(key)
+            (address as? JSONObject)?.optString("uri")?.takeIf(String::isHttpUrl)?.let(::add)
+            addAll(extractUrls(address))
+        }
     }.distinct()
     val direct = mutableListOf<String>()
     val play = mutableListOf<String>()
@@ -252,8 +271,8 @@ private fun collectVideoCandidates(video: JSONObject?, quality: QualityChoice): 
 private fun collectLivePhotoVideoCandidates(item: JSONObject, quality: QualityChoice): List<String> {
     val nestedVideo = item.optJSONObject("video")
     val nested = collectVideoCandidates(nestedVideo, quality)
-    val direct = listOf("video_play_addr", "video_download_addr")
-        .flatMap { item.optJSONObject(it).urlList() }
+    val direct = listOf("video_play_addr", "video_download_addr", "videoPlayAddr", "videoDownloadAddr")
+        .flatMap { extractUrls(item.opt(it)) }
         .map(::cleanDouyinUrl)
     return (nested + direct).distinct()
 }
@@ -309,13 +328,20 @@ private fun buildSignedPlayUrl(
 private fun collectImageCandidates(item: JSONObject): List<String> {
     val sources = listOf(
         Triple(item.opt("watermark_free_download_url_list"), item, 0),
+        Triple(item.opt("watermarkFreeDownloadUrlList"), item, 0),
         Triple(item.opt("origin_image"), item.optJSONObject("origin_image"), 1),
+        Triple(item.opt("originImage"), item.optJSONObject("originImage"), 1),
         Triple(item.opt("display_image"), item.optJSONObject("display_image"), 2),
+        Triple(item.opt("displayImage"), item.optJSONObject("displayImage"), 2),
         Triple(item, item, 3),
         Triple(item.opt("download_url"), item.optJSONObject("download_url"), 4),
+        Triple(item.opt("downloadUrl"), item.optJSONObject("downloadUrl"), 4),
         Triple(item.opt("download_addr"), item.optJSONObject("download_addr"), 5),
+        Triple(item.opt("downloadAddr"), item.optJSONObject("downloadAddr"), 5),
         Triple(item.opt("download_url_list"), item, 6),
-        Triple(item.opt("owner_watermark_image"), item.optJSONObject("owner_watermark_image"), 7)
+        Triple(item.opt("downloadUrlList"), item, 6),
+        Triple(item.opt("owner_watermark_image"), item.optJSONObject("owner_watermark_image"), 7),
+        Triple(item.opt("ownerWatermarkImage"), item.optJSONObject("ownerWatermarkImage"), 7)
     )
     return sources.flatMap { (source, metadata, rank) ->
         extractUrls(source).map { url ->
@@ -331,49 +357,74 @@ private fun extractMusicCandidates(detail: JSONObject?): List<String> {
     detail ?: return emptyList()
     val nestedMusic = detail.optJSONObject("music")
     val nestedInfo = detail.optJSONObject("music_info")
+    val camelInfo = detail.optJSONObject("musicInfo")
     return listOf(
         detail.opt("play_url"),
+        detail.opt("playUrl"),
         detail.opt("play_url_lowbr"),
+        detail.opt("playUrlLowbr"),
         detail.opt("audio_url"),
+        detail.opt("audioUrl"),
         detail.opt("download_url"),
+        detail.opt("downloadUrl"),
         nestedMusic?.opt("play_url"),
+        nestedMusic?.opt("playUrl"),
         nestedMusic?.opt("play_url_lowbr"),
-        nestedInfo?.opt("play_url")
+        nestedMusic?.opt("playUrlLowbr"),
+        nestedInfo?.opt("play_url"),
+        camelInfo?.opt("playUrl")
     ).flatMap(::extractUrls).map(::cleanDouyinUrl).distinct()
 }
 
 private fun galleryItems(payload: JSONObject): List<JSONObject> {
-    val imagePost = payload.optJSONObject("image_post_info")
-    listOf("images", "image_list").forEach { key ->
+    val imagePost = payload.optJSONObject("image_post_info") ?: payload.optJSONObject("imagePostInfo")
+    listOf("images", "image_list", "imageList").forEach { key ->
         imagePost?.optJSONArray(key).objects().takeIf(List<JSONObject>::isNotEmpty)?.let { return it }
     }
-    listOf("images", "image_list").forEach { key ->
+    listOf("images", "image_list", "imageList").forEach { key ->
         payload.optJSONArray(key).objects().takeIf(List<JSONObject>::isNotEmpty)?.let { return it }
     }
     return emptyList()
 }
 
+private fun isGalleryPayload(payload: JSONObject): Boolean =
+    galleryItems(payload).isNotEmpty() ||
+        payload.optInt("aweme_type", payload.optInt("awemeType", -1)) in GALLERY_AWEME_TYPES
+
+private fun hasNestedLivePhoto(payload: JSONObject): Boolean = galleryItems(payload).any { item ->
+    hasVideoSource(item.optJSONObject("video")) ||
+        listOf("video_play_addr", "video_download_addr", "videoPlayAddr", "videoDownloadAddr")
+            .any { extractUrls(item.opt(it)).isNotEmpty() }
+}
+
 private fun hasVideoSource(video: JSONObject?): Boolean = video != null && (
-    PLAY_ADDRESS_KEYS.any { video.optJSONObject(it).urlList().isNotEmpty() || video.optJSONObject(it)?.optString("uri").orEmpty().isNotBlank() } ||
-        video.optString("vid").isNotBlank() || video.optJSONObject("download_addr")?.optString("uri").orEmpty().isNotBlank()
+    PLAY_ADDRESS_KEYS.any { key ->
+        extractUrls(video.opt(key)).isNotEmpty() ||
+            (video.opt(key) as? JSONObject)?.optString("uri").orEmpty().isNotBlank()
+    } || video.optString("vid").isNotBlank() ||
+        DOWNLOAD_ADDRESS_KEYS.any { key ->
+            extractUrls(video.opt(key)).isNotEmpty() ||
+                (video.opt(key) as? JSONObject)?.optString("uri").orEmpty().isNotBlank()
+        }
     )
 
 private fun extractUrls(source: Any?): List<String> = when (source) {
-    is JSONObject -> source.urlList()
-    is JSONArray -> source.strings()
+    is JSONObject -> buildList {
+        listOf("src", "url").forEach { key ->
+            source.optString(key).takeIf(String::isHttpUrl)?.let(::add)
+        }
+        source.optString("uri").takeIf(String::isHttpUrl)?.let(::add)
+        listOf("url_list", "urlList").forEach { key -> addAll(extractUrls(source.optJSONArray(key))) }
+    }
+    is JSONArray -> (0 until source.length()).flatMap { extractUrls(source.opt(it)) }
     is String -> listOf(source).filter(String::isNotBlank)
     else -> emptyList()
 }
 
-private fun JSONObject?.urlList(): List<String> = this?.let {
-    it.optJSONArray("url_list").strings() + it.optJSONArray("urlList").strings()
-}.orEmpty()
+private fun JSONObject?.urlList(): List<String> = extractUrls(this)
 
 private fun JSONArray?.objects(): List<JSONObject> =
     if (this == null) emptyList() else (0 until length()).mapNotNull(::optJSONObject)
-
-private fun JSONArray?.strings(): List<String> =
-    if (this == null) emptyList() else (0 until length()).mapNotNull { optString(it).takeIf(String::isNotBlank) }
 
 private fun imagePixels(source: JSONObject?): Long {
     source ?: return 0
@@ -416,11 +467,111 @@ private fun extractJijiAwemeId(url: String, body: String): String? {
 }
 
 private fun extractDouyinPayloadFromHtml(html: String): JSONObject? {
-    val assignment = Regex("window\\._ROUTER_DATA\\s*=\\s*").find(html) ?: return null
-    val raw = extractJsonObject(html, assignment.range.last + 1) ?: return null
-    return runCatching { findDouyinPayload(JSONObject(raw)) }.getOrNull()
+    Regex("window\\._ROUTER_DATA\\s*=\\s*").find(html)?.let { assignment ->
+        extractJsonObject(html, assignment.range.last + 1)?.let { raw ->
+            runCatching { findDouyinPayload(JSONObject(raw)) }.getOrNull()?.let { return it }
+        }
+    }
+    val pacePattern = Regex("""self\.__pace_f\.push\(\[1,"(?:\\.|[^"\\])*"\]\)""")
+    pacePattern.findAll(html).forEach { match ->
+        extractDouyinPayloadFromPace(match.value)?.let { return it }
+    }
+    return null
 }
 
+@SuppressLint("SetJavaScriptEnabled")
+private suspend fun fetchWebAwemeDetail(context: Context, awemeId: String, pageType: String): JSONObject? =
+    withContext(Dispatchers.Main) {
+        runCatching {
+            suspendCancellableCoroutine { continuation ->
+                val handler = Handler(Looper.getMainLooper())
+                val webView = WebView(context)
+                var completed = false
+                var poll: Runnable? = null
+                lateinit var timeout: Runnable
+
+                fun cleanup() {
+                    poll?.let(handler::removeCallbacks)
+                    handler.removeCallbacks(timeout)
+                    webView.stopLoading()
+                    webView.destroy()
+                }
+
+                fun complete(payload: JSONObject?) {
+                    if (completed) return
+                    completed = true
+                    cleanup()
+                    if (continuation.isActive) continuation.resume(payload)
+                }
+
+                timeout = Runnable { complete(null) }
+                poll = object : Runnable {
+                    override fun run() {
+                        if (completed) return
+                        val script = """
+                            (() => document.documentElement?.outerHTML || "")()
+                        """.trimIndent()
+                        webView.evaluateJavascript(script) { encoded ->
+                            val paceText = runCatching { JSONTokener(encoded).nextValue() as? String }
+                                .getOrNull()
+                                .orEmpty()
+                            val payload = extractDouyinPayloadFromPace(paceText)
+                            if (payload != null) complete(payload)
+                            else if (!completed) handler.postDelayed(this, 750)
+                        }
+                    }
+                }
+
+                webView.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    allowFileAccess = false
+                    allowContentAccess = false
+                    loadsImagesAutomatically = false
+                    blockNetworkImage = true
+                    userAgentString = DOUYIN_USER_AGENT
+                }
+                CookieManager.getInstance().apply {
+                    setAcceptCookie(true)
+                    setAcceptThirdPartyCookies(webView, true)
+                }
+                webView.webViewClient = WebViewClient()
+                continuation.invokeOnCancellation {
+                    handler.post {
+                        if (!completed) {
+                            completed = true
+                            cleanup()
+                        }
+                    }
+                }
+                handler.postDelayed(timeout, 45_000)
+                webView.loadUrl("$DOUYIN_BASE_URL/$pageType/$awemeId")
+                handler.postDelayed(poll, 1_000)
+            }
+        }.getOrNull()
+    }
+
+private fun extractDouyinPayloadFromPace(script: String): JSONObject? = runCatching {
+    val markers = listOf("self.__pace_f.push([1,", "self.__next_f.push([1,")
+    for (marker in markers) {
+        var searchFrom = 0
+        while (true) {
+            val start = script.indexOf(marker, searchFrom)
+            if (start < 0) break
+            val valueStart = start + marker.length
+            val chunk = JSONTokener(script.substring(valueStart)).nextValue() as? String
+            if (chunk != null) {
+                val jsonStart = chunk.indexOf(':') + 1
+                if (jsonStart > 0 && jsonStart < chunk.length) {
+                    findDouyinPayload(JSONTokener(chunk.substring(jsonStart)).nextValue())
+                        ?.let { return@runCatching it }
+                }
+            }
+            searchFrom = valueStart
+        }
+    }
+    null
+}.getOrNull()
 private fun extractJsonObject(text: String, start: Int): String? {
     val objectStart = text.indexOf('{', start)
     if (objectStart < 0) return null
@@ -446,8 +597,12 @@ private fun extractJsonObject(text: String, start: Int): String? {
 
 private fun findDouyinPayload(value: Any?): JSONObject? = when (value) {
     is JSONObject -> {
-        value.optJSONObject("videoInfoRes")?.optJSONArray("item_list")?.optJSONObject(0)?.let { return it }
-        if (value.has("aweme_id") && (value.has("video") || value.has("image_post_info") || value.has("images"))) {
+        val videoInfo = value.optJSONObject("videoInfoRes")
+        videoInfo?.optJSONArray("item_list")?.optJSONObject(0)?.let { return it }
+        videoInfo?.optJSONArray("itemList")?.optJSONObject(0)?.let { return it }
+        if ((value.has("aweme_id") || value.has("awemeId")) &&
+            (value.has("video") || value.has("image_post_info") || value.has("imagePostInfo") || value.has("images"))
+        ) {
             return value
         }
         val keys = value.keys()
@@ -603,26 +758,37 @@ internal fun verifyJijiParserContract() {
     check(gallery.images.size == 2)
     check(gallery.livePhotos.single().image?.url == "https://cdn/live.webp")
     check(gallery.livePhotos.single().video.url == "https://cdn/live.mp4")
-    val topLevelLivePhoto = parseAwemePayload(
+    val camelGallery = parseAwemePayload(
         JSONObject(
-            """{"aweme_id":"3","aweme_type":68,"is_live_photo":1,"images":[{"display_image":{"url_list":["https://cdn/live-cover.webp"]}},{"display_image":{"url_list":["https://cdn/static.webp"]}}],"video":{"play_addr":{"url_list":["https://cdn/top-live.mp4"]}}}"""
+            """{"awemeId":"3","awemeType":68,"images":[{"urlList":["https://cdn/live-1.webp"],"video":{"playAddr":[{"src":"https://cdn/live-1.mp4"}]},"clipType":5,"livePhotoType":1},{"urlList":["https://cdn/live-2.webp"],"video":{"playAddr":[{"src":"https://cdn/live-2.mp4"}]},"clipType":5,"livePhotoType":1}]}"""
         ),
         "https://www.douyin.com/note/3",
         QualityChoice.Best
     )
-    check(topLevelLivePhoto.livePhotos.single().image?.url == "https://cdn/live-cover.webp")
-    check(topLevelLivePhoto.livePhotos.single().video.url == "https://cdn/top-live.mp4")
-    check(topLevelLivePhoto.images.single().url == "https://cdn/static.webp")
-    val legacyLivePhoto = parseAwemePayload(
+    check(camelGallery.images.isEmpty())
+    check(camelGallery.livePhotos.size == 2)
+    check(camelGallery.livePhotos[0].image?.url == "https://cdn/live-1.webp")
+    check(camelGallery.livePhotos[0].video.url == "https://cdn/live-1.mp4")
+    check(camelGallery.livePhotos[1].video.url == "https://cdn/live-2.mp4")
+    val audioOnlyGallery = parseAwemePayload(
         JSONObject(
-            """{"aweme_id":"legacy-live","aweme_type":2,"images":[{"url_list":["https://cdn/legacy-cover.webp"]}],"video":{"duration":0,"play_addr":{"url_list":["https://cdn/legacy-live.mp4"]}}}"""
+            """{"aweme_id":"audio-only","aweme_type":2,"images":[{"url_list":["https://cdn/static.webp"]}],"video":{"duration":0,"play_addr":{"url_list":["https://cdn/audio.mp3"]}}}"""
         ),
-        "https://www.douyin.com/note/legacy-live",
+        "https://www.douyin.com/note/audio-only",
         QualityChoice.Best
     )
-    check(legacyLivePhoto.images.isEmpty())
-    check(legacyLivePhoto.livePhotos.single().video.url == "https://cdn/legacy-live.mp4")
-    check(legacyLivePhoto.audioSourceVideoCandidates.single() == "https://cdn/legacy-live.mp4")
+    check(audioOnlyGallery.images.single().url == "https://cdn/static.webp")
+    check(audioOnlyGallery.livePhotos.isEmpty())
+    val paceDetail = JSONObject(
+        """{"awemeId":"pace-live","awemeType":68,"images":[{"urlList":["https://cdn/pace.webp"],"video":{"playAddr":[{"src":"https://cdn/pace.mp4"}]}}]}"""
+    )
+    val paceChunk = "7:" + JSONArray().put(
+        JSONObject().put("aweme", JSONObject().put("detail", paceDetail))
+    )
+    val pacePayload = extractDouyinPayloadFromPace(
+        "self.__pace_f.push([1,${JSONObject.quote(paceChunk)}])"
+    )
+    check(pacePayload?.optString("awemeId") == "pace-live")
     val manyImages = parseAwemePayload(
         JSONObject().put("aweme_id", "4").put(
             "images",

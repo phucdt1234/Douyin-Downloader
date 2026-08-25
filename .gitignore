@@ -16,6 +16,7 @@ captures/
 *.aab
 *.ap_
 *.dex
+*.idsig
 
 # Signing secrets
 *.jks
